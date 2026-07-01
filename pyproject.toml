@@ -9,10 +9,14 @@ dependencies = []
 [dependency-groups]
 dev = [
     "ruff>=0.15.13",
+    "service",
 ]
 
 [tool.uv]
 exclude-newer = "14 days"
+
+[tool.uv.sources]
+service = { workspace = true }
 
 [tool.uv.workspace]
 members = [
