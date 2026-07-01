@@ -6,20 +6,23 @@
 
 **Architecture:** FastAPI service with a layered core (parsing → chunking → ingest → retrieve → generate) behind pluggable provider interfaces (LLM / embeddings / reranker), backed by Postgres+pgvector. A separate Vite/React/TS app talks to the REST+SSE API. Synchronous ingestion now, with interfaces that let a background-task implementation drop in later.
 
-**Tech Stack:** Python 3.14, uv workspace, FastAPI, SQLModel, asyncpg, pgvector, pydantic-settings, httpx, pypdf, markdown-it-py, openai, cohere, pytest, testcontainers; Vite, React 18, TypeScript, Tailwind, TanStack Query, React Router, Vitest.
+**Tech Stack:** Python 3.14, uv workspace, FastAPI, SQLModel, asyncpg, pgvector, pydantic-settings, httpx, pypdf, markdown-it-py, openai, cohere, pytest, testcontainers, pre-commit; Vite, React 18, TypeScript, Tailwind, TanStack Query, React Router, Vitest, ESLint, Prettier.
 
 ## Global Constraints
 
-- Python `>=3.14`; manage deps with `uv`; lint with `ruff` (run `uv run ruff check` and `uv run ruff format --check` before every commit).
+- Python `>=3.14`; manage deps with `uv`; lint and format with `ruff` (`uv run ruff check` and `uv run ruff format --check`).
+- **Dependency staleness policy: 14 days, applied to both backend and frontend.** Backend: the root `pyproject.toml` already has `[tool.uv] exclude-newer = "14 days"` (line 15), which is the source of truth for Python — do **not** add a duplicate block; the plan documents this existing policy instead of re-pinning it. Frontend: `app/.npmrc` has `min-release-age=14` (added in Task 8.1b). Both policies give upstream maintainers a soak window to pull a bad release before it reaches the lock file, and force us to ride versions that have been "soaked" in the wider ecosystem. If a task needs a *newer* package than the staleness window allows, the right move is to pin it explicitly with a comment, not to relax the policy.
+- **Pre-commit hooks run on every commit** (installed in Task 1.4). The hooks enforce: ruff lint+format on Python, trailing whitespace / EOF newline / large-file checks, YAML/JSON/TOML validity, conventional-commit message format, and basic secrets detection. Frontend `app/` lint/format is **not** in the pre-commit hook (Phase 8 uses npm scripts + CI instead — pre-commit hooks shouldn't require Node in repos where most contributors only touch Python).
 - All service code lives under `service/src/service/`; tests under `service/tests/`.
-- Frontend lives under `app/`; uses `npm`/`pnpm`? — use `npm` (default; pin in `app/package.json`).
+- Frontend lives under `app/`; uses `npm`/`pnpm`? — use `npm` (default; pin in `app/package.json`). `app/.npmrc` enforces 14-day min release age and disables install scripts (see Task 8.1b).
 - Every provider call (LLM/embeddings/reranker) is mocked or faked in tests — never make real network calls in CI/tests.
 - SSE chat uses HTTP POST with `text/event-stream`; frame format is `event: <name>\ndata: <json-or-string>\n\n`.
 - `MAX_UPLOAD_BYTES` default `10485760` (10 MB); enforced before reading the full body.
 - API prefix is `/api/v1` (already established in `feat/api-init`).
 - Branding voice: cooking puns in docs/README only; code identifiers stay neutral.
-- Commit messages follow Conventional Commits (`feat:`, `test:`, `chore:`, `docs:`).
+- Commit messages follow Conventional Commits (`feat:`, `test:`, `chore:`, `docs:`). The `commit-msg` hook enforces this — `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`, `perf:`, `build:`, `ci:`, `style:` are accepted.
 - Each task ends with green tests + a commit. Frequent commits.
+- **Bypass policy:** if a hook MUST be skipped for a one-off reason, use `git commit --no-verify` and document the reason in the commit body. Never `--no-verify` silently.
 
 ## File Structure (locked)
 
@@ -62,9 +65,12 @@ service/tests/
   unit/...
   integration/...
 app/...                          # scaffolded in Phase 8
+  app/.npmrc                     # 14-day min release age + install-script hardening (Task 8.1)
 docker-compose.yml
 Makefile                         # extend existing
 .env.example
+.pre-commit-config.yaml           # ruff, secrets, commit-msg hooks (Task 1.4)
+secrets.baseline                  # detect-secrets baseline (Task 1.4)
 docs/architecture.md
 ```
 
@@ -149,11 +155,15 @@ git commit -m "chore: add runtime and dev dependencies"
 
 **Interfaces:**
 
-- Produces: `Settings` class with fields `openai_api_key: str`, `cohere_api_key: str`,
-  `database_url: str`, `llm_provider: str = "openai"`, `embeddings_provider: str = "openai"`,
+- Produces: `Settings` class with fields `openai_api_key: str | None = None`,
+  `cohere_api_key: str | None = None`, `database_url: str`,
+  `llm_provider: str = "openai"`, `embeddings_provider: str = "openai"`,
   `reranker_provider: str = "cohere"`, `max_upload_bytes: int = 10485760`,
   `llm_model: str = "gpt-4o-mini"`, `embeddings_model: str = "text-embedding-3-small"`,
-  `rerank_model: str = "rerank-english-v3.0"`, `retrieve_top_k: int = 20`, `rerank_top_n: int = 5`.
+  `embeddings_dim: int = 1536`, `rerank_model: str = "rerank-english-v3.0"`,
+  `retrieve_top_k: int = 20`, `rerank_top_n: int = 5`.
+  A `model_validator` raises on startup if a required provider key is missing
+  (e.g. `llm_provider="openai"` requires `openai_api_key`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -175,14 +185,27 @@ def test_settings_defaults(monkeypatch):
     assert s.retrieve_top_k == 20
     assert s.rerank_top_n == 5
     assert s.llm_model == "gpt-4o-mini"
+    assert s.embeddings_dim == 1536
 
 
-def test_settings_requires_openai_key(monkeypatch):
+def test_settings_requires_openai_key_when_openai_llm(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("COHERE_API_KEY", "co-test")
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/ragout")
     with pytest.raises(Exception):
         Settings()
+
+
+def test_settings_keys_optional_when_providers_swapped(monkeypatch):
+    """No API keys required if all providers are 'none' or future-stub values."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/ragout")
+    monkeypatch.setenv("LLM_PROVIDER", "stub")
+    monkeypatch.setenv("EMBEDDINGS_PROVIDER", "stub")
+    monkeypatch.setenv("RERANKER_PROVIDER", "stub")
+    s = Settings()  # should not raise
+    assert s.openai_api_key is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -194,28 +217,52 @@ Expected: FAIL (module import error)
 
 ```python
 # service/src/service/config.py
+from typing import Literal
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Provider name constants — referenced by factory, tests, and docs.
+LLMProviderName = Literal["openai", "stub"]
+EmbeddingsProviderName = Literal["openai", "stub"]
+RerankerProviderName = Literal["cohere", "stub"]
+
+# Default embedding dimension. Centralized here so the SQLModel column,
+# migrations SQL, and embeddings provider all reference the same value.
+DEFAULT_EMBEDDINGS_DIM = 1536
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    openai_api_key: str
-    cohere_api_key: str
+    openai_api_key: str | None = None
+    cohere_api_key: str | None = None
     database_url: str
 
-    llm_provider: str = "openai"
-    embeddings_provider: str = "openai"
-    reranker_provider: str = "cohere"
+    llm_provider: LLMProviderName = "openai"
+    embeddings_provider: EmbeddingsProviderName = "openai"
+    reranker_provider: RerankerProviderName = "cohere"
 
     llm_model: str = "gpt-4o-mini"
     embeddings_model: str = "text-embedding-3-small"
+    embeddings_dim: int = DEFAULT_EMBEDDINGS_DIM
     rerank_model: str = "rerank-english-v3.0"
 
     retrieve_top_k: int = 20
     rerank_top_n: int = 5
 
     max_upload_bytes: int = 10 * 1024 * 1024
+
+    @model_validator(mode="after")
+    def _check_provider_keys(self) -> "Settings":
+        if self.llm_provider == "openai" and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+        if self.embeddings_provider == "openai" and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when EMBEDDINGS_PROVIDER=openai")
+        if self.reranker_provider == "cohere" and not self.cohere_api_key:
+            raise ValueError("COHERE_API_KEY is required when RERANKER_PROVIDER=cohere")
+        return self
 ```
 
 - [ ] **Step 4: Run tests, commit**
@@ -227,24 +274,16 @@ git add service/src/service/config.py service/tests/unit/test_config.py
 git commit -m "feat: add Settings config with pydantic-settings"
 ```
 
-### Task 1.3: Test scaffold + `conftest` with Fake providers
+### Task 1.3: Test scaffold (no fakes yet)
 
 **Files:**
 
-- Create: `service/tests/conftest.py`
 - Create: `service/tests/__init__.py` (empty), `service/tests/unit/__init__.py`, `service/tests/integration/__init__.py`
 - Modify: `pyproject.toml` — add `[tool.pytest.ini_options]` with `asyncio_mode = "auto"` and `testpaths = ["service/tests"]`
 
 **Interfaces:**
 
-- Produces: `fake_llm`, `fake_embeddings`, `fake_reranker` fixtures implementing the Protocols
-  (Protocols defined in Task 2.1; here we pre-import shapes — note: define the Fakes to match
-  the Protocol signatures in Task 2.1). To avoid a forward-reference problem, define the Fakes
-  in this task as plain async objects; Task 2.1 will assert isinstance via Protocol duck typing.
-
-> Note: This task depends on Task 2.1's Protocols. To keep tasks independently buildable,
-> this task defines **local** Fake classes with the same method names; Task 2.1's Protocols
-> will structurally match them. Reorder: implement Task 2.1 first, then this. See Phase 2.
+- Produces: empty test packages and pytest config; no fakes in this task (they live with Task 2.1).
 
 - [ ] **Step 1: Add pytest config to root `pyproject.toml`**
 
@@ -260,74 +299,204 @@ testpaths = ["service/tests"]
 touch service/tests/__init__.py service/tests/unit/__init__.py service/tests/integration/__init__.py
 ```
 
-- [ ] **Step 3: Write conftest with Fake providers (after Task 2.1 exists)**
-
-```python
-# service/tests/conftest.py
-import pytest
-
-from service.providers.base import LLMProvider, EmbeddingsProvider, Reranker
-
-
-class FakeLLM:
-    async def stream(self, prompt, history):
-        for tok in ["Hello", " ", "world"]:
-            yield tok
-
-    async def complete(self, prompt, history):
-        return "Hello world"
-
-
-class FakeEmbeddings:
-    def __init__(self):
-        self._i = 0
-
-    async def embed(self, texts):
-        out = []
-        for _ in texts:
-            out.append([float(self._i := self._i + 1), 0.0, 0.0])
-        return out
-
-
-class FakeReranker:
-    async def rerank(self, query, docs, top_n):
-        scored = [{"index": i, "score": 1.0 - i * 0.1} for i in range(len(docs))]
-        return scored[:top_n]
-
-
-@pytest.fixture
-def fake_llm():
-    return FakeLLM()
-
-
-@pytest.fixture
-def fake_embeddings():
-    return FakeEmbeddings()
-
-
-@pytest.fixture
-def fake_reranker():
-    return FakeReranker()
-```
-
-- [ ] **Step 4: Verify collection, commit**
+- [ ] **Step 3: Verify collection, commit**
 
 ```bash
 uv run pytest --collect-only
 git add service/tests pyproject.toml
-git commit -m "test: add pytest scaffold and fake provider fixtures"
+git commit -m "test: add pytest scaffold"
 ```
+
+> The commit at the end of this task will be the **first commit** the pre-commit
+> hooks run against (in Task 1.4). If hooks are not yet installed (fresh clone),
+> this commit goes through unchanged. If hooks ARE installed (e.g. via the
+> `make setup` target that wires Task 1.4 ahead of Task 1.3), the hooks will
+> run on the staged `pyproject.toml` change and pass — pyproject is not linted
+> by `ruff` unless it has a `[tool.ruff]` section.
+
+### Task 1.4: Pre-commit hooks (ruff, formatting, secrets, commit-msg)
+
+**Files:**
+
+- Modify: `pyproject.toml` — add `pre-commit` to the `dev` dependency group
+- Create: `.pre-commit-config.yaml` at repo root
+- Create: `.pre-commit-hooks/` is **not** needed (we use the standard `ruff-pre-commit` repo)
+- Modify: `Makefile` — add a `setup` target that runs `pre-commit install`
+- Modify: `README.md` (Task 9.2) — document `make setup`
+
+**Interfaces:**
+
+- Produces: `.pre-commit-config.yaml` covering:
+  - `ruff` (lint + format, from the `astral-sh/ruff-pre-commit` repo at the version pinned in `pyproject.toml`).
+  - `pre-commit-hooks` standard library: `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-json`, `check-toml`, `check-added-large-files` (warn at 500 KB, block at 1 MB), `check-merge-conflict`, `detect-private-key`.
+  - `detect-secrets` baseline at `secrets.baseline` (committed). Initial baseline is empty.
+  - `commitizen-tools/commitizen` via the `commit-msg` hook for conventional-commit enforcement.
+- Adds a `make setup` target that runs `uv sync && uv run pre-commit install && uv run pre-commit install --hook-type commit-msg`.
+
+- [ ] **Step 1: Add `pre-commit` to the dev dependency group**
+
+```toml
+# append to root pyproject.toml
+[dependency-groups]
+dev = [
+    "ruff>=0.15.13",
+    "service",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "testcontainers[postgres]>=4.10.0",
+    "pre-commit>=4.0.0",
+    "detect-secrets>=1.5.0",
+]
+```
+
+- [ ] **Step 2: Sync dependencies**
+
+```bash
+uv sync
+uv run -- pre-commit --version   # sanity check
+```
+
+Expected: `pre-commit X.Y.Z` (any 4.x).
+
+- [ ] **Step 3: Create `.pre-commit-config.yaml`**
+
+```yaml
+# .pre-commit-config.yaml
+# Run `uv run pre-commit run --all-files` to execute manually.
+# Hooks are installed by `make setup` (Task 1.4).
+default_language_version:
+  python: python3.14
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.13
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=1000", "--warnkb=500"]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", "secrets.baseline"]
+        exclude: |
+          (?x)^(
+            .*\.lock |
+            .*node_modules/.* |
+            app/dist/.* |
+            service/src/service/eval/results/.* |
+            \.env(\.example)?$
+          )$
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v3.27.0
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+```
+
+- [ ] **Step 4: Create the detect-secrets baseline (initially empty)**
+
+```bash
+uv run detect-secrets scan > secrets.baseline
+git add secrets.baseline
+```
+
+- [ ] **Step 5: Extend the Makefile**
+
+```make
+# append to Makefile (preserving the existing targets)
+.PHONY: setup
+setup:
+	uv sync
+	uv run pre-commit install
+	uv run pre-commit install --hook-type commit-msg
+	uv run pre-commit run --all-files || true   # smoke-run; do not fail first setup
+```
+
+> The `|| true` on the smoke run is intentional: on a brand-new repo there may
+> be staged content from previous tasks that the hooks would format. It gives
+> the developer a chance to review auto-fixes before the first real commit.
+
+- [ ] **Step 6: Install hooks locally**
+
+```bash
+uv run pre-commit install
+uv run pre-commit install --hook-type commit-msg
+```
+
+Expected: creates `.git/hooks/pre-commit` and `.git/hooks/commit-msg`.
+
+- [ ] **Step 7: Verify the hook blocks a bad commit**
+
+Sanity-check that the commit-msg hook actually rejects malformed messages.
+This is a one-shot verification; revert the file immediately after.
+
+```bash
+# Temporarily modify a tracked file (just to have something staged)
+echo "" >> README.md
+git add README.md
+git commit -m "this is not a conventional commit"
+# Expected: hook fails with "commit validation: failed"
+echo "Reverting test commit attempt..."
+git reset HEAD README.md
+git checkout -- README.md
+```
+
+If the hook **passed** the bad message, the `commitizen` hook is not installed
+— re-run `uv run pre-commit install --hook-type commit-msg` and retry.
+
+- [ ] **Step 8: Run hooks against the whole repo to establish a clean baseline**
+
+```bash
+uv run pre-commit run --all-files
+```
+
+Expected: all hooks pass (the repo so far has no Python source to lint, only
+`pyproject.toml` and `secrets.baseline`, both of which pass).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add pyproject.toml uv.lock .pre-commit-config.yaml secrets.baseline Makefile
+git commit -m "chore: add pre-commit hooks (ruff, secrets, commit-msg)"
+```
+
+> The commit message is conventional, so the `commitizen` hook will pass.
+> `ruff` will run on `.pre-commit-config.yaml` — no, wait, ruff only lints
+> files matching its `include` patterns (default: `*.py` / `*.pyi`). The YAML
+> and baseline files are untouched. If `ruff format` ever touches a `.py`
+> file in a future task's diff, the hook will format it in place and the
+> commit will be aborted — re-stage and re-commit.
+
+---
 
 ---
 
 ## Phase 2 — Provider abstraction
 
-### Task 2.1: Provider Protocols + shared dataclasses
+### Task 2.1: Provider Protocols + shared dataclasses + shared fakes
 
 **Files:**
 
 - Create: `service/src/service/providers/__init__.py`
 - Create: `service/src/service/providers/base.py`
+- Create: `service/tests/conftest.py` (single source of truth for Fake providers)
+- Create: `service/tests/fakes.py` (re-exports Fakes for use outside conftest)
 - Test: `service/tests/unit/test_provider_protocols.py`
 
 **Interfaces:**
@@ -337,33 +506,24 @@ git commit -m "test: add pytest scaffold and fake provider fixtures"
     `ScoredText` (`index: int`, `score: float`),
     `ScoredChunk` (`chunk_id: UUID`, `document_id: UUID`, `filename: str`, `ordinal: int`, `text: str`, `score: float`, `metadata: dict`).
   - Protocols `LLMProvider`, `EmbeddingsProvider`, `Reranker` (signatures as in spec §9).
+  - Shared `FakeLLM` / `FakeEmbeddings` / `FakeReranker` in `service/tests/fakes.py` and
+    pytest fixtures `fake_llm` / `fake_embeddings` / `fake_reranker` in `service/tests/conftest.py`.
+    All fakes structurally match the Protocols — verified by the conformance test in this task.
 
-- [ ] **Step 1: Write failing test (structural conformance)**
+- [ ] **Step 1: Write failing test (structural conformance using shared fakes)**
 
 ```python
 # service/tests/unit/test_provider_protocols.py
 from service.providers.base import (
-    LLMProvider, EmbeddingsProvider, Reranker, ChatPrompt, ScoredText,
+    LLMProvider, EmbeddingsProvider, Reranker, ChatPrompt,
 )
+from service.tests.fakes import FakeLLM, FakeEmbeddings, FakeReranker
 
 
-class FakeLLM:
-    async def stream(self, prompt, history): yield "x"
-    async def complete(self, prompt, history): return "x"
-
-
-class FakeEmb:
-    async def embed(self, texts): return [[0.0]]
-
-
-class FakeRer:
-    async def rerank(self, query, docs, top_n): return [ScoredText(index=0, score=1.0)]
-
-
-def test_protocols_accept_fakes():
+def test_protocols_accept_shared_fakes():
     assert isinstance(FakeLLM(), LLMProvider)
-    assert isinstance(FakeEmb(), EmbeddingsProvider)
-    assert isinstance(FakeRer(), Reranker)
+    assert isinstance(FakeEmbeddings(), EmbeddingsProvider)
+    assert isinstance(FakeReranker(), Reranker)
 
 
 def test_chatprompt_fields():
@@ -423,13 +583,110 @@ class Reranker(Protocol):
     async def rerank(self, query: str, docs: list[str], top_n: int) -> list[ScoredText]: ...
 ```
 
-- [ ] **Step 4: Run tests, commit**
+- [ ] **Step 4: Create shared fakes (single source of truth)**
+
+```python
+# service/tests/fakes.py
+"""Deterministic fakes for provider Protocols. Used by unit + integration tests."""
+from service.providers.base import ScoredText
+
+
+class FakeLLM:
+    """Streams a fixed token sequence; complete() joins them."""
+
+    def __init__(self, tokens: list[str] | None = None) -> None:
+        self.tokens = tokens if tokens is not None else ["Hello", " ", "world"]
+        self.calls: list = []  # inspectable history of (prompt, history) pairs
+
+    async def stream(self, prompt, history):
+        self.calls.append((prompt, history))
+        for tok in self.tokens:
+            yield tok
+
+    async def complete(self, prompt, history):
+        self.calls.append((prompt, history))
+        return "".join(self.tokens)
+
+
+class FakeEmbeddings:
+    """Returns unit-axis vectors [1,0,0], [2,0,0], ... per call.
+
+    Deterministic and order-preserving; `start` lets multiple instances
+    coexist without colliding indices.
+    """
+
+    def __init__(self, start: int = 0, dim: int = 3) -> None:
+        self._i = start
+        self._dim = dim
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        out = []
+        for _ in texts:
+            self._i += 1
+            out.append([float(self._i)] + [0.0] * (self._dim - 1))
+        return out
+
+
+class FakeReranker:
+    """Returns the first `top_n` docs with descending synthetic scores."""
+
+    async def rerank(self, query, docs, top_n):
+        scored = [ScoredText(index=i, score=1.0 - i * 0.1) for i in range(len(docs))]
+        return scored[:top_n]
+```
+
+- [ ] **Step 5: Create conftest with fixtures**
+
+```python
+# service/tests/conftest.py
+import pytest_asyncio
+from testcontainers.postgres import PostgresContainer
+
+from service.db.pgvector import run_migrations
+from service.db.session import create_engine
+from service.tests.fakes import FakeEmbeddings, FakeLLM, FakeReranker
+
+
+@pytest.fixture
+def fake_llm():
+    return FakeLLM()
+
+
+@pytest.fixture
+def fake_embeddings():
+    return FakeEmbeddings()
+
+
+@pytest.fixture
+def fake_reranker():
+    return FakeReranker()
+
+
+@pytest_asyncio.fixture
+async def pg_engine():
+    """testcontainers Postgres+pgvector, migrated, disposed at teardown."""
+    container = PostgresContainer("pgvector/pgvector:pg17")
+    container.start()
+    try:
+        url = container.get_connection_url().replace("psycopg2", "asyncpg")
+        engine = create_engine(url)
+        # pgvector extension is provisioned by the pgvector image's initdb;
+        # run_migrations executes CREATE EXTENSION IF NOT EXISTS vector
+        # plus table DDL.
+        await run_migrations(engine)
+        yield engine
+        await engine.dispose()
+    finally:
+        container.stop()
+```
+
+- [ ] **Step 6: Run tests, commit**
 
 ```bash
 uv run pytest service/tests/unit/test_provider_protocols.py -v
-uv run ruff check service/src/service/providers
-git add service/src/service/providers service/tests/unit/test_provider_protocols.py
-git commit -m "feat: add provider Protocols and shared dataclasses"
+uv run ruff check service/src/service/providers service/tests
+git add service/src/service/providers service/tests
+git commit -m "feat: add provider Protocols, shared dataclasses, and shared test fakes"
 ```
 
 ### Task 2.2: OpenAI embeddings + LLM implementations
@@ -730,14 +987,15 @@ git commit -m "feat: add provider factory"
 
 - Create: `service/src/service/db/__init__.py`
 - Create: `service/src/service/db/models.py`
-- Test: `service/tests/integration/test_models.py`
+- Test: `service/tests/unit/test_models_import.py`
 
 **Interfaces:**
 
 - Produces: `Session`, `Document`, `Chunk`, `Message` SQLModel table classes per spec §4.
-  `Chunk.embedding` is `pgvector.sqlalchemy.Vector(1536)`. `Message.cited_chunk_ids` is `list[UUID]` mapped to `ARRAY(UUID)`.
-
-- [ ] **Step 1: Write failing integration test (requires testcontainers; gate behind pg fixture built in 3.3)**
+  `Chunk.embedding` is `pgvector.sqlalchemy.Vector(settings.embeddings_dim)` — the dim
+  is read from a module-level constant imported from `service.config`, so changing
+  the embedding model only requires editing `Settings.embeddings_dim` and updating
+  the migration. `Message.cited_chunk_ids` is `list[UUID]` mapped to `ARRAY(UUID)`.
 
 > This task relies on the testcontainers fixture from Task 3.3. Implement 3.3 first, then this test. For now, create models and a unit test that just imports them.
 
@@ -770,8 +1028,10 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ARRAY, Column
+from sqlalchemy import ARRAY, JSON, Column
 from sqlmodel import Field, SQLModel
+
+from service.config import DEFAULT_EMBEDDINGS_DIM
 
 
 def _now() -> datetime:
@@ -802,8 +1062,8 @@ class Chunk(SQLModel, table=True):
     document_id: UUID = Field(foreign_key="documents.id", index=True)
     ordinal: int
     text: str
-    metadata_: dict = Field(default_factory=dict, sa_column=Column("metadata", __import__("sqlalchemy").JSON))
-    embedding: list[float] = Field(sa_column=Column(Vector(1536)))
+    metadata: dict = Field(default_factory=dict, sa_column=Column("metadata", JSONB := __import__("sqlalchemy.dialects.postgresql", fromlist=["JSONB"]).JSONB))
+    embedding: list[float] = Field(sa_column=Column(Vector(DEFAULT_EMBEDDINGS_DIM)))
 
 
 class Message(SQLModel, table=True):
@@ -816,7 +1076,10 @@ class Message(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 ```
 
-> Note: the `__import__("sqlalchemy").JSON` hack is ugly — in the real implementation import `JSON` at top: `from sqlalchemy import ARRAY, JSON, Column`. Replace accordingly.
+> Note: the `__import__("sqlalchemy.dialects.postgresql", fromlist=["JSONB"])` is a placeholder
+> for `from sqlalchemy.dialects.postgresql import JSONB` — use the explicit top-of-file import in
+> the final implementation. The field is named `metadata` on the Python side; SQLAlchemy's
+> `Column("metadata", JSONB)` handles the same SQL name without the `metadata_` workaround.
 
 - [ ] **Step 4: Run tests, commit**
 
@@ -827,18 +1090,19 @@ git add service/src/service/db service/tests/unit/test_models_import.py
 git commit -m "feat: add SQLModel models"
 ```
 
-### Task 3.2: Migrations SQL + pgvector registration
+### Task 3.2: Migrations SQL (dim-aware) + pgvector runner
 
 **Files:**
 
-- Create: `service/src/service/db/migrations.sql`
+- Create: `service/src/service/db/migrations.sql` (uses placeholder `{EMBEDDINGS_DIM}`)
 - Create: `service/src/service/db/pgvector.py`
 
 **Interfaces:**
 
-- Produces: `migrations.sql` (idempotent: extension + all four tables + HNSW index), `run_migrations(engine)` function that executes the SQL.
+- Produces: `migrations.sql` template (idempotent: extension + all four tables + HNSW index),
+  with `{EMBEDDINGS_DIM}` as a Python format placeholder (NOT a real SQL placeholder). `run_migrations(engine, dim)` reads `Settings.embeddings_dim` and `str.format`s the SQL before executing.
 
-- [ ] **Step 1: Write `migrations.sql`**
+- [ ] **Step 1: Write `migrations.sql` template**
 
 ```sql
 -- service/src/service/db/migrations.sql
@@ -866,8 +1130,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     ordinal INT NOT NULL,
     text TEXT NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    embedding vector(1536) NOT NULL
+    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+    embedding vector({EMBEDDINGS_DIM}) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding
@@ -878,25 +1142,35 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    cited_chunk_ids UUID[] NOT NULL DEFAULT '{}',
+    cited_chunk_ids UUID[] NOT NULL DEFAULT '{{}}',
     created_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 ```
 
-- [ ] **Step 2: Implement `run_migrations`**
+> The `{{}}` is intentional — Python's `.format()` doubles the braces to escape literal `{`/`}`
+> in JSONB defaults. The `{{EMBEDDINGS_DIM}}` would also escape; only the unescaped
+> `{EMBEDDINGS_DIM}` is substituted.
+
+- [ ] **Step 2: Implement `run_migrations` (dim-aware)**
 
 ```python
 # service/src/service/db/pgvector.py
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from service.config import DEFAULT_EMBEDDINGS_DIM
+
 
 MIGRATIONS_PATH = Path(__file__).parent / "migrations.sql"
 
 
-async def run_migrations(engine: AsyncEngine) -> None:
-    sql = MIGRATIONS_PATH.read_text()
+async def run_migrations(engine: AsyncEngine, dim: int = DEFAULT_EMBEDDINGS_DIM) -> None:
+    """Execute idempotent migrations. `dim` is interpolated into migrations.sql.
+
+    Note: the SQL is a trusted template (committed in the repo), not user input.
+    """
+    sql = MIGRATIONS_PATH.read_text().format(EMBEDDINGS_DIM=dim)
     async with engine.begin() as conn:
         await conn.exec_driver_sql(sql)
 ```
@@ -905,20 +1179,23 @@ async def run_migrations(engine: AsyncEngine) -> None:
 
 ```bash
 git add service/src/service/db/migrations.sql service/src/service/db/pgvector.py
-git commit -m "feat: add migrations SQL and runner"
+git commit -m "feat: add dim-aware migrations SQL and runner"
 ```
 
-### Task 3.3: Async engine + session factory + testcontainers fixture
+> If you change `embeddings_dim` after a database has been initialized, run a separate
+> manual migration (drop & recreate `chunks` and its HNSW index). The `IF NOT EXISTS`
+> guards will NOT alter the column type on an existing table.
+
+### Task 3.3: Async engine + session factory
 
 **Files:**
 
 - Create: `service/src/service/db/session.py`
-- Modify: `service/tests/conftest.py` — add `pg_engine` fixture using testcontainers
 
 **Interfaces:**
 
 - Produces: `create_engine(database_url) -> AsyncEngine`, `get_session_factory(engine) -> async_sessionmaker`. `app_lifespan` for FastAPI that runs migrations on startup.
-- Test fixture `pg_engine` yields a fresh Postgres+pgvector container + migrated engine per test.
+- The `pg_engine` test fixture was added in Task 2.1 (single source of truth in `conftest.py`).
 
 - [ ] **Step 1: Write `session.py`**
 
@@ -948,43 +1225,16 @@ async def app_lifespan(engine: AsyncEngine):
     await engine.dispose()
 ```
 
-- [ ] **Step 2: Add testcontainers fixture to `conftest.py`**
-
-```python
-# append to service/tests/conftest.py
-import pytest_asyncio
-from testcontainers.postgres import PostgresContainer
-
-from service.db.pgvector import run_migrations
-from service.db.session import create_engine
-
-
-@pytest_asyncio.fixture
-async def pg_engine():
-    # pgvector-enabled container
-    container = PostgresContainer("pgvector/pgvector:pg17")
-    container.start()
-    try:
-        url = container.get_connection_url().replace("psycopg2", "asyncpg")
-        engine = create_engine(url)
-        await run_migrations(engine)
-        yield engine
-        await engine.dispose()
-    finally:
-        container.stop()
-```
-
-- [ ] **Step 3: Write integration test that round-trips a Session insert**
+- [ ] **Step 2: Write integration test that round-trips a Session insert**
 
 ```python
 # service/tests/integration/test_db_roundtrip.py
-from sqlalchemy.ext.asyncio import AsyncSession
+from service.db.models import Session
+from service.db.session import get_session_factory
 from sqlmodel import select
 
-from service.db.models import Session
 
-
-async def test_session_roundtrip(pg_engine, get_session_factory):
+async def test_session_roundtrip(pg_engine):
     factory = get_session_factory(pg_engine)
     async with factory() as s:
         s.add(Session(title="demo"))
@@ -995,15 +1245,13 @@ async def test_session_roundtrip(pg_engine, get_session_factory):
         assert rows[0].title == "demo"
 ```
 
-> Add a `get_session_factory` fixture alias in conftest returning `get_session_factory` from `service.db.session`.
-
-- [ ] **Step 4: Run tests, commit**
+- [ ] **Step 3: Run tests, commit**
 
 ```bash
 uv run pytest service/tests/integration -v
 uv run ruff check service/src/service/db
-git add service/src/service/db/session.py service/tests/conftest.py service/tests/integration/test_db_roundtrip.py
-git commit -m "feat: add async engine, session factory, testcontainers fixture"
+git add service/src/service/db/session.py service/tests/integration/test_db_roundtrip.py
+git commit -m "feat: add async engine and session factory"
 ```
 
 ---
@@ -1364,7 +1612,7 @@ class SyncIngestService:
             await s.flush()
             for piece, vec in zip(pieces, vectors, strict=True):
                 s.add(Chunk(document_id=doc.id, ordinal=piece.ordinal, text=piece.text,
-                            metadata_=piece.metadata, embedding=vec))
+                            metadata=piece.metadata, embedding=vec))
             await s.commit()
             return DocumentSummary(id=doc.id, filename=doc.filename, num_chunks=doc.num_chunks,
                                    content_hash=doc.content_hash)
@@ -1433,14 +1681,20 @@ Expected: FAIL (routes missing)
 # service/src/service/api/deps.py
 from functools import lru_cache
 
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from service.config import Settings
+from service.core.generate import GenerateService
 from service.core.ingest import SyncIngestService
+from service.core.retrieve import RetrieveService
 from service.db.session import create_engine, get_session_factory
-from service.providers.factory import build_embeddings
+from service.providers.base import EmbeddingsProvider, LLMProvider, Reranker
+from service.providers.factory import build_embeddings, build_llm, build_reranker
 
+# Module-level engine handle. Set once at app startup; tests can call
+# set_engine() before constructing the app to inject a testcontainer engine.
 _engine: AsyncEngine | None = None
 
 
@@ -1449,24 +1703,78 @@ def set_engine(engine: AsyncEngine) -> None:
     _engine = engine
 
 
+def get_engine() -> AsyncEngine:
+    if _engine is None:
+        raise RuntimeError("Engine not initialized; call set_engine() at app startup")
+    return _engine
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
-
-
-def get_engine() -> AsyncEngine:
-    if _engine is None:
-        raise RuntimeError("Engine not initialized")
-    return _engine
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return get_session_factory(get_engine())
 
 
-def get_ingest_service() -> SyncIngestService:
-    return SyncIngestService(embeddings=build_embeddings(get_settings()), session_factory=get_session_factory())
+# --- Provider deps (overridable via app.dependency_overrides) ---------------
+
+
+def get_llm_provider(settings: Settings = Depends(get_settings)) -> LLMProvider:
+    return build_llm(settings)
+
+
+def get_embeddings_provider(settings: Settings = Depends(get_settings)) -> EmbeddingsProvider:
+    return build_embeddings(settings)
+
+
+def get_reranker_provider(settings: Settings = Depends(get_settings)) -> Reranker:
+    return build_reranker(settings)
+
+
+# --- Service deps ----------------------------------------------------------
+
+
+def get_ingest_service(
+    embeddings: EmbeddingsProvider = Depends(get_embeddings_provider),
+    factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+) -> SyncIngestService:
+    return SyncIngestService(embeddings=embeddings, session_factory=factory)
+
+
+def get_retrieve_service(
+    embeddings: EmbeddingsProvider = Depends(get_embeddings_provider),
+    reranker: Reranker = Depends(get_reranker_provider),
+    factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+    settings: Settings = Depends(get_settings),
+) -> RetrieveService:
+    return RetrieveService(
+        embeddings=embeddings,
+        reranker=reranker,
+        session_factory=factory,
+        top_k=settings.retrieve_top_k,
+        top_n=settings.rerank_top_n,
+    )
+
+
+def get_generate_service(
+    llm: LLMProvider = Depends(get_llm_provider),
+    factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+) -> GenerateService:
+    return GenerateService(llm=llm, session_factory=factory)
 ```
+
+> Tests override dependencies via FastAPI's built-in mechanism, not module-level globals:
+>
+> ```python
+> from service.api.deps import get_llm_provider, get_embeddings_provider, get_reranker_provider
+> app.dependency_overrides[get_llm_provider] = lambda: fake_llm
+> app.dependency_overrides[get_embeddings_provider] = lambda: fake_embeddings
+> app.dependency_overrides[get_reranker_provider] = lambda: fake_reranker
+> ```
+>
+> This is the framework's official pattern and is test-isolated.
 
 - [ ] **Step 4: Implement `sessions.py`**
 
@@ -1515,30 +1823,53 @@ async def delete_session(session_id: UUID, factory=Depends(get_session_factory))
 # service/src/service/api/routers/documents.py
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlmodel import select
 
 from service.api.deps import get_ingest_service, get_session_factory, get_settings
 from service.core.ingest import IngestService
+from service.core.parsing import detect_mime, UnsupportedMimeError
 from service.db.models import Document
 
 router = APIRouter()
 
 
 @router.post("/{session_id}/documents", status_code=200)
-async def upload_document(session_id: UUID, file: UploadFile = File(...),
-                          ingest: IngestService = Depends(get_ingest_service),
-                          settings=Depends(get_settings)) -> dict:
+async def upload_document(
+    request: Request,
+    session_id: UUID,
+    file: UploadFile = File(...),
+    ingest: IngestService = Depends(get_ingest_service),
+    settings=Depends(get_settings),
+) -> dict:
+    # Enforce size limit BEFORE reading the full body. We can't trust
+    # Content-Length in all proxies, so we also cap the in-memory read.
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > settings.max_upload_bytes:
+        raise HTTPException(413, "Upload too large")
     raw = await file.read()
     if len(raw) > settings.max_upload_bytes:
         raise HTTPException(413, "Upload too large")
-    mime = file.content_type or "application/octet-stream"
+    # Trust filename extension first; fall back to Content-Type; finally
+    # sniff a PDF magic header. Many browsers send application/octet-stream
+    # for .md files, which would otherwise 422.
+    mime = detect_mime(
+        filename=file.filename or "upload",
+        declared=file.content_type,
+        head=raw[:5],
+    )
     try:
         summary = await ingest.ingest(session_id, file.filename or "upload", mime, raw)
+    except UnsupportedMimeError as e:
+        raise HTTPException(415, str(e)) from e
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
-    return {"id": str(summary.id), "filename": summary.filename,
-            "num_chunks": summary.num_chunks, "content_hash": summary.content_hash}
+    return {
+        "id": str(summary.id),
+        "filename": summary.filename,
+        "num_chunks": summary.num_chunks,
+        "content_hash": summary.content_hash,
+    }
 
 
 @router.get("/{session_id}/documents")
@@ -1556,6 +1887,57 @@ async def delete_document(session_id: UUID, doc_id: UUID, factory=Depends(get_se
             raise HTTPException(404, "Document not found")
         await s.delete(row)
         await s.commit()
+```
+
+- [ ] **Step 5b: Add `detect_mime` helper in `core/parsing.py`**
+
+```python
+# append to service/src/service/core/parsing.py
+_MIME_BY_EXT = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".pdf": "application/pdf",
+}
+
+
+def detect_mime(*, filename: str, declared: str | None, head: bytes) -> str:
+    """Resolve MIME type from filename extension, declared Content-Type, then
+    a small PDF magic-bytes sniff. Returns a value `parse()` understands.
+    """
+    # 1. Filename extension is the most reliable signal (browsers lie).
+    name = filename.lower()
+    for ext, mime in _MIME_BY_EXT.items():
+        if name.endswith(ext):
+            return mime
+    # 2. Magic-bytes sniff for PDF.
+    if head.startswith(b"%PDF-"):
+        return "application/pdf"
+    # 3. Trust the declared Content-Type if it's a supported one.
+    if declared in {"text/plain", "text/markdown", "application/pdf"}:
+        return declared
+    # 4. Last resort: assume text/plain; parse() will raise on garbage.
+    return declared or "application/octet-stream"
+```
+
+- [ ] **Step 5c: Add a unit test for `detect_mime`**
+
+```python
+# append to service/tests/unit/test_parsing.py
+from service.core.parsing import detect_mime
+
+
+def test_detect_mime_from_md_extension():
+    assert detect_mime(filename="notes.md", declared="application/octet-stream", head=b"# Hi") == "text/markdown"
+
+
+def test_detect_mime_from_pdf_magic_when_extension_missing():
+    assert detect_mime(filename="blob", declared=None, head=b"%PDF-1.4\n") == "application/pdf"
+
+
+def test_detect_mime_prefers_extension_over_declaration():
+    # A .md file with a bogus Content-Type should still resolve to markdown.
+    assert detect_mime(filename="a.md", declared="text/plain", head=b"# Hi") == "text/markdown"
 ```
 
 - [ ] **Step 6: Wire routers in `run.py`**
@@ -1602,6 +1984,91 @@ uv run pytest service/tests/integration/test_routers_sessions_documents.py -v
 uv run ruff check service/src/service
 git add service/src/service/api service/tests/integration/test_routers_sessions_documents.py
 git commit -m "feat: add sessions and documents routers"
+```
+
+- [ ] **Step 8: Add cascade-delete integration test**
+
+> Spec §4 calls out cascades; §13 lists "cascade deletes" as an integration
+> test. Verify that deleting a session removes its documents, chunks, and
+> messages, and that deleting a document removes its chunks.
+
+```python
+# service/tests/integration/test_cascade_delete.py
+from sqlmodel import select
+
+from service.core.ingest import SyncIngestService
+from service.db.models import Chunk, Document, Message, Session
+from service.db.session import get_session_factory
+
+
+async def test_deleting_session_cascades_to_chunks_and_messages(
+    pg_engine, fake_embeddings
+):
+    factory = get_session_factory(pg_engine)
+    async with factory() as s:
+        s.add(Session(title="t"))
+        await s.commit()
+        sid = (await s.exec(select(Session))).one().id
+
+    ingest = SyncIngestService(fake_embeddings, factory)
+    summary = await ingest.ingest(sid, "a.txt", "text/plain", b"Hello there.")
+
+    # Seed a chat message pair via a direct insert.
+    async with factory() as s:
+        s.add(Message(session_id=sid, role="user", content="q", cited_chunk_ids=[]))
+        s.add(Message(session_id=sid, role="assistant", content="a",
+                      cited_chunk_ids=[]))
+        await s.commit()
+
+    async with factory() as s:
+        assert (await s.exec(select(Document).where(Document.session_id == sid))).one()
+        assert (await s.exec(select(Chunk))).all()
+        assert (await s.exec(select(Message).where(Message.session_id == sid))).all()
+
+    # Delete the session.
+    async with factory() as s:
+        row = await s.get(Session, sid)
+        await s.delete(row)
+        await s.commit()
+
+    async with factory() as s:
+        assert (await s.exec(select(Document).where(Document.session_id == sid))).all() == []
+        assert (await s.exec(select(Chunk))).all() == []
+        assert (await s.exec(select(Message).where(Message.session_id == sid))).all() == []
+
+
+async def test_deleting_document_cascades_to_chunks(
+    pg_engine, fake_embeddings
+):
+    factory = get_session_factory(pg_engine)
+    async with factory() as s:
+        s.add(Session(title="t"))
+        await s.commit()
+        sid = (await s.exec(select(Session))).one().id
+
+    ingest = SyncIngestService(fake_embeddings, factory)
+    summary = await ingest.ingest(sid, "a.txt", "text/plain", b"x " * 200)
+
+    async with factory() as s:
+        chunks_before = (await s.exec(select(Chunk).where(Chunk.document_id == summary.id))).all()
+        assert chunks_before
+
+    async with factory() as s:
+        doc = await s.get(Document, summary.id)
+        await s.delete(doc)
+        await s.commit()
+
+    async with factory() as s:
+        chunks_after = (await s.exec(select(Chunk).where(Chunk.document_id == summary.id))).all()
+        assert chunks_after == []
+```
+
+- [ ] **Step 9: Run cascade tests, commit**
+
+```bash
+uv run pytest service/tests/integration/test_cascade_delete.py -v
+git add service/tests/integration/test_cascade_delete.py
+git commit -m "test: verify cascade deletes for sessions and documents"
 ```
 
 ---
@@ -1693,7 +2160,7 @@ class RetrieveService:
             chunk, doc, _ = candidates[r.index]
             out.append(ScoredChunk(chunk_id=chunk.id, document_id=doc.id, filename=doc.filename,
                                    ordinal=chunk.ordinal, text=chunk.text, score=r.score,
-                                   metadata=chunk.metadata_))
+                                   metadata=chunk.metadata))
         return out
 ```
 
@@ -1727,18 +2194,24 @@ git commit -m "feat: add retrieve service with rerank"
 # service/tests/unit/test_generate.py
 import json
 
-from service.core.generate import build_prompt, format_sse, GenerateService
-from service.providers.base import ScoredText  # noqa
+from service.core.generate import (
+    build_prompt, format_sse_event, format_sse_json, GenerateService,
+)
 
 
-def test_format_sse_string():
-    assert format_sse("token", "hi") == "event: token\ndata: hi\n\n"
+def test_format_sse_event_string():
+    assert format_sse_event("token", "hi") == "event: token\ndata: hi\n\n"
 
 
-def test_format_sse_dict_json():
-    frame = format_sse("done", {"a": 1})
+def test_format_sse_json_dict():
+    frame = format_sse_json("done", {"a": 1})
     assert frame.startswith("event: done\ndata: ")
     assert json.loads(frame.split("data: ", 1)[1].strip()) == {"a": 1}
+
+
+def test_format_sse_event_does_not_json_encode_string():
+    # The point: token events must NEVER be quoted JSON strings.
+    assert '"hi"' not in format_sse_event("token", "hi")
 
 
 def test_build_prompt_numbers_chunks():
@@ -1765,16 +2238,31 @@ from collections.abc import AsyncIterator
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from service.core.schemas import Message
 from service.db.models import Message as MessageRow
 from service.providers.base import ChatPrompt, LLMProvider, ScoredChunk
 
+# Cap on prior turns passed to the LLM. Beyond this, only the system prompt
+# and the current question are sent. Keep small — token cost grows linearly.
+HISTORY_TURNS = 10
+
 
 def format_sse(event: str, data) -> str:
     payload = json.dumps(data) if not isinstance(data, str) else data
     return f"event: {event}\ndata: {payload}\n\n"
+
+
+def format_sse_event(event: str, text: str) -> str:
+    """Explicit string-data variant — prevents accidentally JSON-encoding tokens."""
+    return f"event: {event}\ndata: {text}\n\n"
+
+
+def format_sse_json(event: str, data) -> str:
+    """Explicit dict-data variant — guarantees JSON encoding."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def build_prompt(system: str, chunks: list[ScoredChunk], question: str) -> ChatPrompt:
@@ -1796,13 +2284,26 @@ class GenerateService:
         self._llm = llm
         self._factory = session_factory
 
+    async def _load_history(self, session_id: UUID) -> list[tuple[str, str]]:
+        """Load the last HISTORY_TURNS messages for this session as (role, content)."""
+        async with self._factory() as s:
+            stmt = (
+                select(MessageRow)
+                .where(MessageRow.session_id == session_id)
+                .order_by(MessageRow.created_at.desc())
+                .limit(HISTORY_TURNS)
+            )
+            rows = (await s.exec(stmt)).all()
+        # Reverse to chronological order; the current user turn is added by the caller.
+        return [(r.role, r.content) for r in reversed(rows)]
+
     async def stream(self, session_id: UUID, query: str, chunks: list[ScoredChunk]) -> AsyncIterator[str]:
         prompt = build_prompt(SYSTEM_PROMPT, chunks, query)
-        history: list = []  # could load prior messages; keep simple for MVP
+        history = await self._load_history(session_id)
         answer_parts: list[str] = []
         async for token in self._llm.stream(prompt, history):
             answer_parts.append(token)
-            yield format_sse("token", token)
+            yield format_sse_event("token", token)
         citations = [{"doc_id": str(c.document_id), "filename": c.filename,
                       "ordinal": c.ordinal, "score": c.score, "snippet": c.text[:200]} for c in chunks]
         async with self._factory() as s:
@@ -1810,7 +2311,7 @@ class GenerateService:
             s.add(MessageRow(session_id=session_id, role="assistant", content="".join(answer_parts),
                              cited_chunk_ids=[c.chunk_id for c in chunks]))
             await s.commit()
-        yield format_sse("done", {"citations": citations})
+        yield format_sse_json("done", {"citations": citations})
 ```
 
 - [ ] **Step 4: Run tests, commit**
@@ -1841,22 +2342,33 @@ git commit -m "feat: add SSE framing and generate service"
 # service/tests/integration/test_routers_chat.py
 from httpx import AsyncClient
 
+from service.api.deps import (
+    get_embeddings_provider, get_llm_provider, get_reranker_provider, set_engine,
+)
 from service.api.run import create_app
 
 
-async def test_chat_streams_tokens_and_done(pg_engine, monkeypatch, fake_llm, fake_embeddings, fake_reranker):
+async def test_chat_streams_tokens_and_done(
+    pg_engine, monkeypatch, fake_llm, fake_embeddings, fake_reranker
+):
     monkeypatch.setenv("OPENAI_API_KEY", "sk")
     monkeypatch.setenv("COHERE_API_KEY", "co")
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/ragout")
-    from service.api.deps import set_engine, override_services
     set_engine(pg_engine)
-    override_services(llm=fake_llm, embeddings=fake_embeddings, reranker=fake_reranker)
     app = create_app()
+    # Test-isolated overrides via FastAPI's built-in mechanism.
+    app.dependency_overrides[get_llm_provider] = lambda: fake_llm
+    app.dependency_overrides[get_embeddings_provider] = lambda: fake_embeddings
+    app.dependency_overrides[get_reranker_provider] = lambda: fake_reranker
     async with AsyncClient(app=app, base_url="http://t") as client:
         sid = (await client.post("/api/v1/sessions", json={"title": "t"})).json()["id"]
-        await client.post(f"/api/v1/sessions/{sid}/documents",
-                          files={"file": ("a.txt", b"Paris is the capital of France.", "text/plain")})
-        async with client.stream("POST", f"/api/v1/sessions/{sid}/chat", json={"query": "capital?"}) as r:
+        await client.post(
+            f"/api/v1/sessions/{sid}/documents",
+            files={"file": ("a.txt", b"Paris is the capital of France.", "text/plain")},
+        )
+        async with client.stream(
+            "POST", f"/api/v1/sessions/{sid}/chat", json={"query": "capital?"}
+        ) as r:
             body = "".join([line async for line in r.aiter_text()])
         assert "event: token" in body
         assert "event: done" in body
@@ -1867,39 +2379,16 @@ async def test_chat_streams_tokens_and_done(pg_engine, monkeypatch, fake_llm, fa
 Run: `uv run pytest service/tests/integration/test_routers_chat.py -v`
 Expected: FAIL (route missing)
 
-- [ ] **Step 3: Add dep overrides + service getters in `deps.py`**
+- [ ] **Step 3: Confirm `deps.py` has all chat dependencies**
 
-```python
-# append to service/src/service/api/deps.py
-from service.core.generate import GenerateService
-from service.core.retrieve import RetrieveService
-from service.providers.factory import build_llm, build_reranker
-
-_overrides: dict = {}
-
-
-def override_services(*, llm=None, embeddings=None, reranker=None) -> None:
-    if llm is not None:
-        _overrides["llm"] = llm
-    if embeddings is not None:
-        _overrides["embeddings"] = embeddings
-    if reranker is not None:
-        _overrides["reranker"] = reranker
-
-
-def get_retrieve_service(settings=Depends(get_settings)):
-    emb = _overrides.get("embeddings", build_embeddings(settings))
-    rer = _overrides.get("reranker", build_reranker(settings))
-    return RetrieveService(emb, rer, get_session_factory(),
-                           top_k=settings.retrieve_top_k, top_n=settings.rerank_top_n)
-
-
-def get_generate_service(settings=Depends(get_settings)):
-    llm = _overrides.get("llm", build_llm(settings))
-    return GenerateService(llm, get_session_factory())
-```
-
-> Add `from fastapi import Depends` at top of deps.py.
+> The `get_llm_provider`, `get_embeddings_provider`, `get_reranker_provider`,
+> `get_retrieve_service`, and `get_generate_service` were added to
+> `service/src/service/api/deps.py` in Task 5.2 (Step 3). No additional
+> wiring is needed here. Verify by importing them:
+>
+> ```bash
+> uv run python -c "from service.api.deps import get_retrieve_service, get_generate_service; print('ok')"
+> ```
 
 - [ ] **Step 4: Implement `chat.py`**
 
@@ -1912,16 +2401,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlmodel import select
 
-from service.api.deps import get_generate_service, get_session_factory
+from service.api.deps import (
+    get_generate_service, get_retrieve_service, get_session_factory,
+)
 from service.core.generate import GenerateService
 from service.core.retrieve import RetrieveService
 from service.db.models import Message, Session
 
 router = APIRouter()
-
-
-def _get_retrieve(settings=Depends(get_settings)):  # wired via deps import below
-    ...
 
 
 @router.post("/{session_id}/chat")
@@ -1952,8 +2439,6 @@ async def messages(session_id: UUID, factory=Depends(get_session_factory)) -> li
         return [{"id": str(r.id), "role": r.role, "content": r.content,
                  "cited_chunk_ids": [str(c) for c in r.cited_chunk_ids]} for r in rows]
 ```
-
-> Add imports `from service.api.deps import get_retrieve_service` at top of chat.py (the local `_get_retrieve` stub is a placeholder — remove it and use the deps import).
 
 - [ ] **Step 5: Run tests, commit**
 
@@ -2179,6 +2664,7 @@ git commit -m "feat: add eval harness CLI and metrics"
 - Create: `app/tailwind.config.ts`, `app/postcss.config.js`, `app/src/index.css`
 - Create: `app/vite.config.ts` (proxy `/api` → `http://localhost:8000`)
 - Create: `app/.gitignore`
+- Create: `app/.npmrc` (14-day min release age, ignore install scripts, lockfile enforcement — see Step 1b)
 
 - [ ] **Step 1: Scaffold**
 
@@ -2188,6 +2674,61 @@ cd app && npm install
 npm install react-router-dom @tanstack/react-query
 npm install -D tailwindcss postcss autoprefixer
 npx tailwindcss init -p
+```
+
+- [ ] **Step 1b: Create `app/.npmrc` with the 14-day staleness policy**
+
+This file must exist *before* any further `npm install` so subsequent installs
+honor it. Create it now, then re-run `npm install` to regenerate the lock file
+under the new policy (vite's scaffold install happened without it).
+
+```ini
+# app/.npmrc
+# Mirrors the backend's uv `exclude-newer = "14 days"` policy for the
+# frontend dependency tree. See Global Constraints.
+
+# Refuse to install any package published in the last 14 days.
+# Forces the dependency tree to ride versions that have been "soaked"
+# in the wider npm ecosystem, giving upstream maintainers a window to
+# pull a bad release. npm 10.7+ only — older npm warns and ignores.
+min-release-age=14
+
+# Never execute package install scripts (preinstall, install, postinstall).
+# This is a supply-chain hardening measure: the event-stream and
+# ua-parser-js incidents of 2018/2021 shipped malicious code via install
+# scripts. We give up convenience (e.g. esbuild's postinstall download,
+# husky's git hook installer) in exchange for a real security boundary.
+# Re-enable per-package with `npm rebuild <pkg> --foreground-scripts`
+# if a specific tool genuinely needs it.
+ignore-scripts=true
+
+# Always record `^x.y.z` ranges in package.json (the npm default, made
+# explicit). With the lock file committed (next line), this lets patches
+# flow without lock-file churn.
+save-exact=false
+
+# Always create/update package-lock.json. This is the npm default but
+# some CI flags override it; making it explicit defends against that.
+package-lock=true
+
+# Silence the "please donate to my dependencies" nag at the end of
+# every install. Purely cosmetic.
+fund=false
+
+# Treat moderate-or-higher npm audit advisories as install failures.
+# `low`/`info` advisories stay in the lockfile audit section for
+# awareness but don't block installs. `high` would let real issues
+# through; `low` makes CI noisy on a fresh Vite scaffold.
+audit-level=moderate
+```
+
+```bash
+# Re-run install under the new policy so package-lock.json is generated
+# honoring min-release-age. The first install above (during the Vite
+# scaffold) ignored the policy because .npmrc didn't exist yet.
+cd app
+npm install
+cd ..
 ```
 
 - [ ] **Step 2: Configure Tailwind** (`app/tailwind.config.ts` content paths `./src/**/*`, `app/src/index.css` with `@tailwind` directives).
@@ -2355,7 +2896,11 @@ git commit -m "feat: add docker compose setup"
 - [ ] **Step 1: Extend `Makefile`**
 
 ```make
-.PHONY: up down migrate eval test test-app
+.PHONY: setup up down migrate eval test test-app lint format
+setup:
+	uv sync
+	uv run pre-commit install
+	uv run pre-commit install --hook-type commit-msg
 up:
 	docker compose up --build
 down:
@@ -2368,11 +2913,15 @@ test:
 	uv run pytest -v
 test-app:
 	cd app && npm test -- --run
+lint:
+	uv run ruff check .
+format:
+	uv run ruff format .
 run-service-api:
 	uv run --package service service-api
 ```
 
-- [ ] **Step 2: Write root `README.md`** with cooking-pun intro, architecture summary, quick start, screenshot placeholder.
+- [ ] **Step 2: Write root `README.md`** with cooking-pun intro, architecture summary, quick start (mention `make setup` as the first step), screenshot placeholder.
 
 - [ ] **Step 3: Write `docs/architecture.md`** with data-flow diagrams (upload, chat) and provider abstraction explanation.
 
@@ -2389,7 +2938,23 @@ git commit -m "docs: add READMEs, architecture doc, Makefile targets"
 
 ## Self-Review Notes
 
-- **Spec coverage:** All spec sections (§1–§16) map to tasks: data model → 3.1/3.2; ingestion → 5.1; retrieval → 6.1; generation → 6.2; API → 5.2/6.3; providers → 2.x; frontend → 8.x; eval → 7.x; compose/docs → 9.x.
-- **Type consistency:** `ScoredChunk` defined in 2.1, used in 6.1/6.2; `cited_chunk_ids` is `uuid[]` (fixed in spec) — `MessageRow.cited_chunk_ids` uses `ARRAY(UUID)` in 3.1; `DocumentSummary` defined in 4.3, used in 5.1. Confirmed consistent.
-- **Known soft spots to watch during implementation:** (a) SQLModel `metadata_`→`metadata` column mapping needs an explicit `sa_column`; (b) `pgvector` cosine order via `Chunk.embedding.cosine_distance`; (c) testcontainers `get_connection_url` returns a psycopg2 URL — replace driver to asyncpg; (d) `@app.on_event("startup")` is deprecated in newer FastAPI — prefer `lifespan` context manager (refactor in 9.1 if needed).
+- **Spec coverage:** All spec sections (§1–§16) map to tasks: data model → 3.1/3.2; ingestion → 5.1; retrieval → 6.1; generation → 6.2; API → 5.2/6.3; providers → 2.x; frontend → 8.x; eval → 7.x; compose/docs → 9.x. Cascade-delete coverage (spec §4, §13) added in Task 5.2 Step 8. Pre-commit hooks (a critical cross-cutting concern) added as Task 1.4.
+- **Type consistency:** `ScoredChunk` defined in 2.1, used in 6.1/6.2; `cited_chunk_ids` is `uuid[]` — `MessageRow.cited_chunk_ids` uses `ARRAY(UUID)` in 3.1; `DocumentSummary` defined in 4.3, used in 5.1. `Chunk.metadata` (Python) → `metadata` (SQL) via `Column("metadata", JSONB)`. Embedding dim centralized in `service.config.DEFAULT_EMBEDDINGS_DIM` and referenced from `db/models.py`, `db/pgvector.py`, and `Settings.embeddings_dim`.
+- **Test isolation:** `app.dependency_overrides` is the single override mechanism (Task 5.2/6.3). Module-level `_overrides` globals from the prior draft are gone.
+- **MIME detection:** `parse()` trusts the caller; `documents.py` router uses `detect_mime(filename, declared, head)` which prefers extension → PDF magic → declared → fallback. Browsers sending `application/octet-stream` for `.md` files no longer 422.
+- **Chat history:** `GenerateService._load_history()` reads the last 10 turns from the `messages` table and passes them to the LLM. The previous `history: list = []` placeholder is replaced.
+- **Cascade deletes:** `test_cascade_delete.py` covers both session→{documents,chunks,messages} and document→chunks.
+- **Provider key optionality:** `openai_api_key` and `cohere_api_key` are `str | None`; the `Settings` model validator raises only when the corresponding provider is selected. This unblocks the future stub/local-provider paths.
+- **Pre-commit scope (Task 1.4):** runs on every commit. Covers Python (ruff lint+format), whitespace/YAML/JSON/TOML validity, large files, merge-conflict markers, private keys, secrets (detect-secrets with committed baseline), and conventional-commit message format. Frontend `app/` is **not** in the pre-commit hook because (a) most contributors only touch Python in this phase and (b) Node tooling doesn't belong in every developer's PATH. Frontend lint/format is enforced via npm scripts and a future CI step.
 - **Placeholder-free:** each code step contains real code; test assertions are concrete.
+
+### Watch-fors (intentionally not folded into the plan, but flag during implementation)
+
+1. `@app.on_event("startup")` is deprecated in newer FastAPI — prefer the `lifespan` context manager; refactor in Task 9.1 if needed.
+2. The `MAX_UPLOAD_BYTES` HTTP code is 413 (Payload Too Large) in the router; spec §8 says 400. Pick one and align before shipping.
+3. Frontend `chatStream` should plumb an `AbortController` and clean up on unmount to avoid leaked streams.
+4. `python -m service.eval run` calls live OpenAI + Cohere clients; gate behind `EVAL_OFFLINE=1` env var (with fakes) for CI use.
+5. `asyncio.get_event_loop().time()` is deprecated for filenames in 3.14; use `time.time_ns()` or `datetime.now(timezone.utc).isoformat()`.
+6. The migration template's `{{}}` for JSONB defaults is a Python-format escape; the real SQL has literal `{}`. Double-check by reading the rendered output once during implementation.
+7. Consider adding a `DocumentPanel` component test that asserts an unsupported-MIME upload surfaces a 415 error to the user (covers the `detect_mime` fallback path).
+8. Eval harness uses real providers; consider a `--offline` flag (fakes) for CI.
