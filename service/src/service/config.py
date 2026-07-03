@@ -3,7 +3,6 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 LLMProviderName = Literal["openai", "stub"]
 EmbeddingsProviderName = Literal["openai", "stub"]
 RerankerProviderName = Literal["cohere", "stub"]
@@ -30,6 +29,7 @@ class Settings(BaseSettings):
     retrieve_top_k: int = 20
     rerank_top_n: int = 5
 
+    # 10 MB limit
     max_upload_bytes: int = 10 * 1024 * 1024
 
     @model_validator(mode="after")
