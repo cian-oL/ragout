@@ -11,10 +11,11 @@ router = APIRouter()
 
 @router.get("/health", tags=["health"])
 def health_check() -> dict:
-    """
-    Health check endpoint.
-    """
+    """Return service health status and current timestamp.
 
+    Returns:
+        A dict with ``status`` and ``time`` keys.
+    """
     return {
         "status": "OK",
         "time": datetime.now(timezone.utc).isoformat(),

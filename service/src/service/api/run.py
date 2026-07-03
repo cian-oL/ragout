@@ -1,5 +1,5 @@
 """
-API entrypoint.
+FastAPI application factory and entrypoint.
 """
 
 import uvicorn
@@ -9,10 +9,11 @@ from service.api.routers import health
 
 
 def create_app() -> FastAPI:
-    """
-    FastAPI application factory.
-    """
+    """Create and configure the FastAPI application.
 
+    Returns:
+        A configured FastAPI instance with all routers mounted.
+    """
     prefix = "/api/v1"
 
     app = FastAPI(
@@ -28,10 +29,7 @@ app = create_app()
 
 
 def main():
-    """
-    Run the service API.
-    """
-
+    """Run the service API with uvicorn auto-reload."""
     uvicorn.run(
         app="service.api.run:app",
         reload=True,

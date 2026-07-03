@@ -1,17 +1,22 @@
+"""
+Application settings loaded from environment variables.
+"""
+
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-LLMProviderName = Literal["openai", "stub"]
-EmbeddingsProviderName = Literal["openai", "stub"]
-RerankerProviderName = Literal["cohere", "stub"]
+LLMProviderName = Literal["openai"]
+EmbeddingsProviderName = Literal["openai"]
+RerankerProviderName = Literal["cohere"]
 
 DEFAULT_EMBEDDINGS_DIM = 1536
 
 
 class Settings(BaseSettings):
+    """Ragout configuration sourced from env vars and .env file."""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     openai_api_key: str | None = None
@@ -30,10 +35,12 @@ class Settings(BaseSettings):
     retrieve_top_k: int = 20
     rerank_top_n: int = 5
 
+    # 10 MB limit
     max_upload_bytes: int = 10 * 1024 * 1024
 
     @model_validator(mode="after")
     def _check_provider_keys(self) -> "Settings":
+        """Fail fast if a configured provider is missing its required API key."""
         if self.llm_provider == "openai" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
         if self.embeddings_provider == "openai" and not self.openai_api_key:

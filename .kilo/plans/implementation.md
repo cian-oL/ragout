@@ -88,13 +88,13 @@ docs/architecture.md
 
 **Interfaces:** Produces a runnable FastAPI app on `main` with `/api/v1/health`.
 
-- [ ] **Step 1: Merge the remote branch into main locally**
+- [x] **Step 1: Merge the remote branch into main locally**
 
 ```bash
 git merge origin/feat/api-init --no-ff -m "chore: merge feat/api-init (FastAPI skeleton)"
 ```
 
-- [ ] **Step 2: Add runtime dependencies to `service/pyproject.toml`**
+- [x] **Step 2: Add runtime dependencies to `service/pyproject.toml`**
 
 ```toml
 dependencies = [
@@ -112,7 +112,7 @@ dependencies = [
 ]
 ```
 
-- [ ] **Step 3: Add dev/test dependencies to root `pyproject.toml`**
+- [x] **Step 3: Add dev/test dependencies to root `pyproject.toml`**
 
 ```toml
 [dependency-groups]
@@ -125,7 +125,7 @@ dev = [
 ]
 ```
 
-- [ ] **Step 4: Sync and verify the app boots**
+- [x] **Step 4: Sync and verify the app boots**
 
 ```bash
 uv sync
@@ -137,7 +137,7 @@ kill %1
 
 Expected: `{"status":"OK",...}`
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 uv run ruff check .
@@ -165,7 +165,7 @@ git commit -m "chore: add runtime and dev dependencies"
   A `model_validator` raises on startup if a required provider key is missing
   (e.g. `llm_provider="openai"` requires `openai_api_key`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # service/tests/unit/test_config.py
@@ -208,12 +208,12 @@ def test_settings_keys_optional_when_providers_swapped(monkeypatch):
     assert s.openai_api_key is None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest service/tests/unit/test_config.py -v`
 Expected: FAIL (module import error)
 
-- [ ] **Step 3: Write implementation**
+- [x] **Step 3: Write implementation**
 
 ```python
 # service/src/service/config.py
@@ -265,7 +265,7 @@ class Settings(BaseSettings):
         return self
 ```
 
-- [ ] **Step 4: Run tests, commit**
+- [x] **Step 4: Run tests, commit**
 
 ```bash
 uv run pytest service/tests/unit/test_config.py -v
@@ -285,7 +285,7 @@ git commit -m "feat: add Settings config with pydantic-settings"
 
 - Produces: empty test packages and pytest config; no fakes in this task (they live with Task 2.1).
 
-- [ ] **Step 1: Add pytest config to root `pyproject.toml`**
+- [x] **Step 1: Add pytest config to root `pyproject.toml`**
 
 ```toml
 [tool.pytest.ini_options]
@@ -293,13 +293,13 @@ asyncio_mode = "auto"
 testpaths = ["service/tests"]
 ```
 
-- [ ] **Step 2: Create package marker files**
+- [x] **Step 2: Create package marker files**
 
 ```bash
 touch service/tests/__init__.py service/tests/unit/__init__.py service/tests/integration/__init__.py
 ```
 
-- [ ] **Step 3: Verify collection, commit**
+- [x] **Step 3: Verify collection, commit**
 
 ```bash
 uv run pytest --collect-only
@@ -333,7 +333,7 @@ git commit -m "test: add pytest scaffold"
   - `commitizen-tools/commitizen` via the `commit-msg` hook for conventional-commit enforcement.
 - Adds a `make setup` target that runs `uv sync && uv run pre-commit install && uv run pre-commit install --hook-type commit-msg`.
 
-- [ ] **Step 1: Add `pre-commit` to the dev dependency group**
+- [x] **Step 1: Add `pre-commit` to the dev dependency group**
 
 ```toml
 # append to root pyproject.toml
@@ -349,7 +349,7 @@ dev = [
 ]
 ```
 
-- [ ] **Step 2: Sync dependencies**
+- [x] **Step 2: Sync dependencies**
 
 ```bash
 uv sync
@@ -358,7 +358,7 @@ uv run -- pre-commit --version   # sanity check
 
 Expected: `pre-commit X.Y.Z` (any 4.x).
 
-- [ ] **Step 3: Create `.pre-commit-config.yaml`**
+- [x] **Step 3: Create `.pre-commit-config.yaml`**
 
 ```yaml
 # .pre-commit-config.yaml
@@ -409,14 +409,14 @@ repos:
         stages: [commit-msg]
 ```
 
-- [ ] **Step 4: Create the detect-secrets baseline (initially empty)**
+- [x] **Step 4: Create the detect-secrets baseline (initially empty)**
 
 ```bash
 uv run detect-secrets scan > secrets.baseline
 git add secrets.baseline
 ```
 
-- [ ] **Step 5: Extend the Makefile**
+- [x] **Step 5: Extend the Makefile**
 
 ```make
 # append to Makefile (preserving the existing targets)
@@ -432,7 +432,7 @@ setup:
 > be staged content from previous tasks that the hooks would format. It gives
 > the developer a chance to review auto-fixes before the first real commit.
 
-- [ ] **Step 6: Install hooks locally**
+- [x] **Step 6: Install hooks locally**
 
 ```bash
 uv run pre-commit install
@@ -441,7 +441,7 @@ uv run pre-commit install --hook-type commit-msg
 
 Expected: creates `.git/hooks/pre-commit` and `.git/hooks/commit-msg`.
 
-- [ ] **Step 7: Verify the hook blocks a bad commit**
+- [x] **Step 7: Verify the hook blocks a bad commit**
 
 Sanity-check that the commit-msg hook actually rejects malformed messages.
 This is a one-shot verification; revert the file immediately after.
@@ -460,7 +460,7 @@ git checkout -- README.md
 If the hook **passed** the bad message, the `commitizen` hook is not installed
 — re-run `uv run pre-commit install --hook-type commit-msg` and retry.
 
-- [ ] **Step 8: Run hooks against the whole repo to establish a clean baseline**
+- [x] **Step 8: Run hooks against the whole repo to establish a clean baseline**
 
 ```bash
 uv run pre-commit run --all-files
@@ -469,7 +469,7 @@ uv run pre-commit run --all-files
 Expected: all hooks pass (the repo so far has no Python source to lint, only
 `pyproject.toml` and `secrets.baseline`, both of which pass).
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add pyproject.toml uv.lock .pre-commit-config.yaml secrets.baseline Makefile
@@ -510,7 +510,7 @@ git commit -m "chore: add pre-commit hooks (ruff, secrets, commit-msg)"
     pytest fixtures `fake_llm` / `fake_embeddings` / `fake_reranker` in `service/tests/conftest.py`.
     All fakes structurally match the Protocols — verified by the conformance test in this task.
 
-- [ ] **Step 1: Write failing test (structural conformance using shared fakes)**
+- [x] **Step 1: Write failing test (structural conformance using shared fakes)**
 
 ```python
 # service/tests/unit/test_provider_protocols.py
@@ -531,12 +531,12 @@ def test_chatprompt_fields():
     assert p.system == "s" and p.context == ["c"] and p.user == "u"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest service/tests/unit/test_provider_protocols.py -v`
 Expected: FAIL (import error)
 
-- [ ] **Step 3: Write implementation**
+- [x] **Step 3: Write implementation**
 
 ```python
 # service/src/service/providers/base.py
@@ -583,7 +583,7 @@ class Reranker(Protocol):
     async def rerank(self, query: str, docs: list[str], top_n: int) -> list[ScoredText]: ...
 ```
 
-- [ ] **Step 4: Create shared fakes (single source of truth)**
+- [x] **Step 4: Create shared fakes (single source of truth)**
 
 ```python
 # service/tests/fakes.py
@@ -635,7 +635,7 @@ class FakeReranker:
         return scored[:top_n]
 ```
 
-- [ ] **Step 5: Create conftest with fixtures**
+- [x] **Step 5: Create conftest with fixtures**
 
 ```python
 # service/tests/conftest.py
@@ -680,7 +680,7 @@ async def pg_engine():
         container.stop()
 ```
 
-- [ ] **Step 6: Run tests, commit**
+- [x] **Step 6: Run tests, commit**
 
 ```bash
 uv run pytest service/tests/unit/test_provider_protocols.py -v
@@ -702,7 +702,7 @@ git commit -m "feat: add provider Protocols, shared dataclasses, and shared test
 - Consumes: `Settings` (`openai_api_key`, `llm_model`, `embeddings_model`), Protocols from Task 2.1.
 - Produces: `OpenAILLM`, `OpenAIEmbeddings` classes.
 
-- [ ] **Step 1: Write failing test using a mocked `openai.AsyncOpenAI`**
+- [x] **Step 1: Write failing test using a mocked `openai.AsyncOpenAI`**
 
 ```python
 # service/tests/unit/test_openai_providers.py
@@ -745,12 +745,12 @@ async def test_llm_complete(monkeypatch):
     assert "".join(toks) == "hi"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest service/tests/unit/test_openai_providers.py -v`
 Expected: FAIL (imports)
 
-- [ ] **Step 3: Implement `OpenAIEmbeddings`**
+- [x] **Step 3: Implement `OpenAIEmbeddings`**
 
 ```python
 # service/src/service/providers/embeddings.py
@@ -769,7 +769,7 @@ class OpenAIEmbeddings:
         return [d.embedding for d in resp.data]
 ```
 
-- [ ] **Step 4: Implement `OpenAILLM`**
+- [x] **Step 4: Implement `OpenAILLM`**
 
 ```python
 # service/src/service/providers/llm.py
@@ -807,7 +807,7 @@ class OpenAILLM:
         return "".join([t async for t in self.stream(prompt, history)])
 ```
 
-- [ ] **Step 5: Run tests, commit**
+- [x] **Step 5: Run tests, commit**
 
 ```bash
 uv run pytest service/tests/unit/test_openai_providers.py -v
@@ -828,7 +828,7 @@ git commit -m "feat: add OpenAI LLM and embeddings providers"
 - Consumes: `Settings` (`cohere_api_key`, `rerank_model`), `Reranker` Protocol, `ScoredText`.
 - Produces: `CohereReranker`.
 
-- [ ] **Step 1: Write failing test (mock `cohere.AsyncClient`)**
+- [x] **Step 1: Write failing test (mock `cohere.AsyncClient`)**
 
 ```python
 # service/tests/unit/test_cohere_reranker.py
@@ -854,12 +854,12 @@ async def test_rerank_maps_results(monkeypatch):
     assert out[0].index == 1 and out[0].score == 0.9
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest service/tests/unit/test_cohere_reranker.py -v`
 Expected: FAIL (import)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # service/src/service/providers/reranker.py
@@ -880,7 +880,7 @@ class CohereReranker:
         return [ScoredText(index=r.index, score=r.relevance_score) for r in resp.results]
 ```
 
-- [ ] **Step 4: Run tests, commit**
+- [x] **Step 4: Run tests, commit**
 
 ```bash
 uv run pytest service/tests/unit/test_cohere_reranker.py -v
@@ -901,7 +901,7 @@ git commit -m "feat: add Cohere reranker provider"
 - Consumes: `Settings` (Task 1.2), provider classes (2.2, 2.3).
 - Produces: `build_llm(settings) -> LLMProvider`, `build_embeddings(settings) -> EmbeddingsProvider`, `build_reranker(settings) -> Reranker`. Raises `ValueError` for unknown provider names.
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```python
 # service/tests/unit/test_provider_factory.py
@@ -934,12 +934,12 @@ def test_build_unknown_raises(monkeypatch):
         build_llm(s)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest service/tests/unit/test_provider_factory.py -v`
 Expected: FAIL (import)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # service/src/service/providers/factory.py
@@ -968,7 +968,7 @@ def build_reranker(settings: Settings) -> Reranker:
     raise ValueError(f"Unknown reranker provider: {settings.reranker_provider}")
 ```
 
-- [ ] **Step 4: Run tests, commit**
+- [x] **Step 4: Run tests, commit**
 
 ```bash
 uv run pytest service/tests/unit/test_provider_factory.py -v
