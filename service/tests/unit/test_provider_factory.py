@@ -6,6 +6,8 @@ from service.providers.factory import build_embeddings, build_llm, build_reranke
 from service.providers.llm import OpenAILLM
 from service.providers.reranker import CohereReranker
 
+pytestmark = pytest.mark.unit
+
 
 def _settings(monkeypatch, **overrides):
     monkeypatch.setenv("OPENAI_API_KEY", "sk")

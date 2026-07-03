@@ -11,6 +11,18 @@ class OpenAILLM:
         self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
 
+    async def stream(self, prompt: ChatPrompt, history: list) -> AsyncIterator[str]:
+        stream = await self._client.chat.completions.create(
+            model=self._model, messages=self._messages(prompt, history), stream=True
+        )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+    async def complete(self, prompt: ChatPrompt, history: list) -> str:
+        return "".join([t async for t in self.stream(prompt, history)])
+
     def _messages(
         self, prompt: ChatPrompt, history: list
     ) -> list[ChatCompletionMessageParam]:
@@ -23,15 +35,3 @@ class OpenAILLM:
             msgs.append({"role": "user", "content": f"Context:\n{ctx}"})
         msgs.append({"role": "user", "content": prompt.user})
         return msgs
-
-    async def stream(self, prompt: ChatPrompt, history: list) -> AsyncIterator[str]:
-        stream = await self._client.chat.completions.create(
-            model=self._model, messages=self._messages(prompt, history), stream=True
-        )
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
-
-    async def complete(self, prompt: ChatPrompt, history: list) -> str:
-        return "".join([t async for t in self.stream(prompt, history)])

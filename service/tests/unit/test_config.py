@@ -2,6 +2,8 @@ import pytest
 
 from service.config import Settings
 
+pytestmark = pytest.mark.unit
+
 
 def test_settings_defaults(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")

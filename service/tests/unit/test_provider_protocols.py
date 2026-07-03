@@ -1,3 +1,5 @@
+import pytest
+
 from service.providers.base import (
     LLMProvider,
     EmbeddingsProvider,
@@ -7,6 +9,8 @@ from service.providers.base import (
     ScoredChunk,
 )
 from fakes import FakeLLM, FakeEmbeddings, FakeReranker
+
+pytestmark = pytest.mark.unit
 
 
 def test_protocols_accept_shared_fakes():

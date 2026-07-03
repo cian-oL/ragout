@@ -1,7 +1,11 @@
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from service.providers.base import Reranker, ScoredText
 from service.providers.reranker import CohereReranker
+
+pytestmark = pytest.mark.unit
 
 
 async def test_rerank_maps_results(monkeypatch):

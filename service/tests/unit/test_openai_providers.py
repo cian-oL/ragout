@@ -1,8 +1,12 @@
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from service.providers.base import ChatPrompt, EmbeddingsProvider, LLMProvider
 from service.providers.embeddings import OpenAIEmbeddings
 from service.providers.llm import OpenAILLM
+
+pytestmark = pytest.mark.unit
 
 
 async def test_embeddings_calls_openai(monkeypatch):
