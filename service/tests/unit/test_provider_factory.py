@@ -23,19 +23,19 @@ def test_build_defaults(monkeypatch):
     assert isinstance(build_reranker(s), CohereReranker)
 
 
-def test_build_unknown_llm_raises(monkeypatch):
-    s = _settings(monkeypatch, llm_provider="stub")
+def test_build_unknown_llm_raises():
+    s = Settings.model_construct(llm_provider="bogus")
     with pytest.raises(ValueError, match="Unknown LLM provider"):
         build_llm(s)
 
 
-def test_build_unknown_embeddings_raises(monkeypatch):
-    s = _settings(monkeypatch, embeddings_provider="stub")
+def test_build_unknown_embeddings_raises():
+    s = Settings.model_construct(embeddings_provider="bogus")
     with pytest.raises(ValueError, match="Unknown embeddings provider"):
         build_embeddings(s)
 
 
-def test_build_unknown_reranker_raises(monkeypatch):
-    s = _settings(monkeypatch, reranker_provider="stub")
+def test_build_unknown_reranker_raises():
+    s = Settings.model_construct(reranker_provider="bogus")
     with pytest.raises(ValueError, match="Unknown reranker provider"):
         build_reranker(s)

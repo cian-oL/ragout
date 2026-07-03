@@ -14,5 +14,7 @@ class OpenAIEmbeddings:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts into vectors using the configured model."""
+        if not texts:
+            return []
         response = await self._client.embeddings.create(input=texts, model=self._model)
         return [d.embedding for d in response.data]

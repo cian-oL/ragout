@@ -28,13 +28,9 @@ def test_settings_requires_openai_key_when_openai_llm(monkeypatch):
         Settings()
 
 
-def test_settings_keys_optional_when_providers_swapped(monkeypatch):
-    """No API keys required if all providers are 'none' or future-stub values."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+def test_settings_requires_cohere_key_when_cohere_reranker(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("COHERE_API_KEY", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/ragout")
-    monkeypatch.setenv("LLM_PROVIDER", "stub")
-    monkeypatch.setenv("EMBEDDINGS_PROVIDER", "stub")
-    monkeypatch.setenv("RERANKER_PROVIDER", "stub")
-    s = Settings()  # should not raise
-    assert s.openai_api_key is None
+    with pytest.raises(Exception):
+        Settings()

@@ -7,9 +7,9 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-LLMProviderName = Literal["openai", "stub"]
-EmbeddingsProviderName = Literal["openai", "stub"]
-RerankerProviderName = Literal["cohere", "stub"]
+LLMProviderName = Literal["openai"]
+EmbeddingsProviderName = Literal["openai"]
+RerankerProviderName = Literal["cohere"]
 
 DEFAULT_EMBEDDINGS_DIM = 1536
 
