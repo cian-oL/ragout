@@ -1,3 +1,7 @@
+"""
+OpenAI LLM provider implementation.
+"""
+
 from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
@@ -7,11 +11,14 @@ from service.providers.base import ChatPrompt
 
 
 class OpenAILLM:
+    """LLM provider backed by OpenAI's chat completions API."""
+
     def __init__(self, api_key: str, model: str):
         self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
 
     async def stream(self, prompt: ChatPrompt, history: list) -> AsyncIterator[str]:
+        """Yield tokens from a streamed OpenAI chat completion."""
         stream = await self._client.chat.completions.create(
             model=self._model, messages=self._messages(prompt, history), stream=True
         )
@@ -21,11 +28,13 @@ class OpenAILLM:
                 yield delta
 
     async def complete(self, prompt: ChatPrompt, history: list) -> str:
+        """Return a complete chat response by consuming the full stream."""
         return "".join([t async for t in self.stream(prompt, history)])
 
     def _messages(
         self, prompt: ChatPrompt, history: list
     ) -> list[ChatCompletionMessageParam]:
+        """Assemble message list: system, history, context, then user prompt."""
         msgs: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": prompt.system}
         ]
